@@ -6,54 +6,62 @@ import theano.tensor as T
 from theano.tensor.nnet import conv
 from theano.tensor.signal import downsample
 
-from DataModel import CData
+from csxnet.datamodel import CData
+
+floatX = theano.config.floatX
+
+print("Theano configs:")
+print("floatX: {}".format(floatX))
+print("device: {}".format(theano.config.device))
 
 # Set hyperparameters
 inshape = (1, 28, 28)
 fshape = (5, 1, 3, 3)
 outputs = 10
 batch_size = 10
-eta = 0.15
-lmbd = 5.0
+lmbd = np.array([5.0]).astype(floatX)
 epochs = 30
 
 # Pull MNIST data                      Yes, I know it's ugly
 data = CData("mnist.pkl.gz", cross_val=1-0.8571428571428571)
-
-# Calculate weight decay rate
-l2term = 1 - ((lmbd*eta)/data.N)
+data.standardize()
 
 # Define theano Tensors
-X = T.tensor4("X") # Inputs
-Y = T.matrix("Y")  # Targets
-m = T.scalar("m", dtype='int32') # Batch size
+X = T.tensor4("X", dtype=floatX)  # Inputs
+Y = T.matrix("Y", dtype=floatX)  # Targets
+m = T.scalar("m", dtype='int32')  # Batch size
+eta = T.scalar("eta", dtype=floatX)
 
 # Define update-able shared variables
-F = theano.shared(np.random.randn(*fshape))   # Convolutional filter
-W = theano.shared(np.random.randn(5*13*13, 10)) # FC Layer weight matrix
+F = theano.shared(np.random.randn(*fshape).astype(floatX), name="Filters")
+W = theano.shared(np.random.randn(5*13*13, 10).astype(floatX), name="FCWeights")
+
+m_real = m.astype(floatX)
 
 # Define the activation of layers
-A1 = T.nnet.sigmoid(conv.conv2d(X, F))  # Convolution
+A1 = T.tanh(conv.conv2d(X, F))  # Convolution
 # Max pooling
 A2 = T.reshape(downsample.max_pool_2d(A1, (2, 2), ignore_border=True), (m, 5*13*13))
-A3 = T.nnet.softmax(A2.dot(W))
+A3 = T.tanh(A2.dot(W))
 
-# Definition of cost function
-# -(Y * T.log(A3) - (1 - Y) * T.log(1 - A3)).sum()
-cost = T.nnet.categorical_crossentropy(A3, Y).sum()  # Cross-entropy cost
+# l2 = T.sum((F*F).sum() + (W*W).sum())
+# l2 *= lmbd / (data.N * 2)
 
+cost = T.nnet.categorical_crossentropy(A3, Y).sum()
+# cost += l2
 # Define prediction symbolically
 prediction = T.argmax(A3, axis=1)
 
 # Define the update rules for the filter and weight tensors
-update_F = l2term * F - (eta / m) * T.grad(cost, F)
-update_W = l2term * W - (eta / m) * T.grad(cost, W)
+update_F = F - (eta / m_real) * T.grad(cost, F)
+update_W = W - (eta / m_real) * T.grad(cost, W)
 
 # Compile methods
-train = theano.function(inputs=[X, Y, m], updates=[(F, update_F), (W, update_W)])
-predict = theano.function(inputs=[X, Y, m], outputs=[cost, prediction])
+train = theano.function(inputs=[X, Y, m, eta], updates=[(F, update_F), (W, update_W)],
+                        allow_input_downcast=True)
+predict = theano.function(inputs=[X, Y, m], outputs=[cost, prediction],
+                          allow_input_downcast=True)
 
-log = open("logCNN.txt", "w")
 
 start = time.time()
 
@@ -61,13 +69,14 @@ start = time.time()
 for i in range(epochs):
     for batch in data.batchgen(10):
         bsize = batch[0].shape[0]
-        train(batch[0], batch[1], bsize)
+        train(batch[0], batch[1], bsize, 0.15)
     testtable = data.table(data="testing")
     costval, preds = predict(testtable[0], testtable[1], 10000)
     predrate = np.sum(np.equal(preds, data.dummycode("testing"))) / len(preds)
     log.write("Epoch:\t{}\tCost:\t{}\tAccuracy:\t{}\n"
               .format(i+1, costval, predrate))
     print("Epoch {} / {} done. Current prediction accuracy: {}".format(i+1, epochs, predrate))
+log = open("logCNN.txt", "w")
 log.write("Seconds elapsed: {}\n".format(time.time() - start))
 log.close()
 print("Run finished. Log dumped to logCNN.txt!")
